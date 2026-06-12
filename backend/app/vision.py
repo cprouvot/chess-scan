@@ -89,7 +89,7 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-def find_exact_grid(img_gray):
+def find_exact_grid(img_gray, x_search_range=None, y_search_range=None):
     """
     Calcule l'alignement exact de la grille d'échecs 8x8 en recherchant les maxima de gradients cumulés.
     Contraint la grille à être parfaitement carrée (step_x == step_y).
@@ -117,6 +117,13 @@ def find_exact_grid(img_gray):
     best_start_y = 0
     best_step = 0
     
+    # Utiliser cv2.dilate pour pré-calculer le maximum local sur une fenêtre de +/- 2 pixels.
+    # Cela évite que les pics étroits ou l'imprécision des sous-pixels ne fassent chuter le score d'accumulation.
+    kernel = np.ones((1, 5), dtype=np.uint8)
+    
+    sum_x_max = cv2.dilate(sum_x.reshape(1, -1).astype(np.float32), kernel).flatten()
+    sum_y_max = cv2.dilate(sum_y.reshape(1, -1).astype(np.float32), kernel).flatten()
+    
     # Pré-calculer les scores pour chaque (start, step) en X et Y
     x_scores = {}
     y_scores = {}
@@ -125,23 +132,45 @@ def find_exact_grid(img_gray):
         x_scores[step] = np.zeros(w, dtype=np.float32)
         y_scores[step] = np.zeros(h, dtype=np.float32)
         
-        for start_x in range(0, w - 8 * step + 1):
-            x_scores[step][start_x] = sum(sum_x[start_x + i * step] for i in range(9))
+        x_start_min = 0
+        x_start_max = w - 8 * step
+        if x_search_range is not None:
+            x_start_min = max(0, x_search_range[0])
+            x_start_max = min(x_start_max, x_search_range[1])
             
-        for start_y in range(0, h - 8 * step + 1):
-            y_scores[step][start_y] = sum(sum_y[start_y + i * step] for i in range(9))
+        y_start_min = 0
+        y_start_max = h - 8 * step
+        if y_search_range is not None:
+            y_start_min = max(0, y_search_range[0])
+            y_start_max = min(y_start_max, y_search_range[1])
+            
+        for start_x in range(x_start_min, x_start_max + 1):
+            x_scores[step][start_x] = sum(sum_x_max[start_x + i * step] for i in range(9))
+            
+        for start_y in range(y_start_min, y_start_max + 1):
+            y_scores[step][start_y] = sum(sum_y_max[start_y + i * step] for i in range(9))
             
     # Recherche jointe du meilleur step et des offsets
     for step in range(min_step, max_step):
-        max_start_x = w - 8 * step
-        max_start_y = h - 8 * step
-        if max_start_x < 0 or max_start_y < 0:
+        x_start_min = 0
+        x_start_max = w - 8 * step
+        if x_search_range is not None:
+            x_start_min = max(0, x_search_range[0])
+            x_start_max = min(x_start_max, x_search_range[1])
+            
+        y_start_min = 0
+        y_start_max = h - 8 * step
+        if y_search_range is not None:
+            y_start_min = max(0, y_search_range[0])
+            y_start_max = min(y_start_max, y_search_range[1])
+            
+        if x_start_max < x_start_min or y_start_max < y_start_min:
             continue
             
-        best_x_idx = np.argmax(x_scores[step][:max_start_x + 1])
+        best_x_idx = x_start_min + np.argmax(x_scores[step][x_start_min:x_start_max + 1])
         best_x_val = x_scores[step][best_x_idx]
         
-        best_y_idx = np.argmax(y_scores[step][:max_start_y + 1])
+        best_y_idx = y_start_min + np.argmax(y_scores[step][y_start_min:y_start_max + 1])
         best_y_val = y_scores[step][best_y_idx]
         
         total_score = best_x_val + best_y_val
@@ -154,7 +183,7 @@ def find_exact_grid(img_gray):
     if best_step == 0:
         best_step = min(w, h) // 8
         
-    return best_start_x, best_step, best_start_y, best_step
+    return int(best_start_x), int(best_step), int(best_start_y), int(best_step)
 
 def find_and_warp_board(image_np):
     """
@@ -210,24 +239,68 @@ def find_and_warp_board(image_np):
         exact_h = step_y * 8
         
         # S'assurer que la boîte reste dans les limites de l'image originale
-        exact_x = max(0, min(exact_x, w - 1))
-        exact_y = max(0, min(exact_y, h - 1))
-        exact_w = max(8, min(exact_w, w - exact_x))
-        exact_h = max(8, min(exact_h, h - exact_y))
+        exact_x = int(max(0, min(exact_x, w - 1)))
+        exact_y = int(max(0, min(exact_y, h - 1)))
+        exact_w = int(max(8, min(exact_w, w - exact_x)))
+        exact_h = int(max(8, min(exact_h, h - exact_y)))
         
         logger.info(f"Alignement pixel-perfect : x={exact_x}, y={exact_y}, w={exact_w}, h={exact_h}")
         exact_crop = image_np[exact_y:exact_y+exact_h, exact_x:exact_x+exact_w]
         warped = cv2.resize(exact_crop, (640, 640))
         return warped, {"x": exact_x, "y": exact_y, "w": exact_w, "h": exact_h}
         
-    # Repli s'il n'y a pas de grand contour carré explicite : on prend le plus grand carré au centre de l'image
-    logger.warning("Aucun échiquier trouvé par détection de contours. Utilisation d'un recadrage central par défaut.")
-    min_dim = min(h, w)
-    start_y = (h - min_dim) // 2
-    start_x = (w - min_dim) // 2
-    cropped = image_np[start_y:start_y+min_dim, start_x:start_x+min_dim]
-    warped = cv2.resize(cropped, (640, 640))
-    return warped, {"x": start_x, "y": start_y, "w": min_dim, "h": min_dim}
+    # Repli s'il n'y a pas de grand contour carré explicite :
+    # Si l'image est déjà presque carrée (échiquier pré-découpé), on fait un simple crop central
+    aspect_ratio = float(w) / h
+    if 0.90 <= aspect_ratio <= 1.10:
+        logger.info(f"Image de ratio {aspect_ratio:.2f} déjà presque carrée. Recadrage central direct.")
+        min_dim = min(h, w)
+        start_y = (h - min_dim) // 2
+        start_x = (w - min_dim) // 2
+        cropped = image_np[start_y:start_y+min_dim, start_x:start_x+min_dim]
+        warped = cv2.resize(cropped, (640, 640))
+        return warped, {"x": start_x, "y": start_y, "w": min_dim, "h": min_dim}
+
+    logger.warning("Aucun échiquier trouvé par détection de contours. Utilisation de la grille de gradients contrainte pour l'alignement.")
+    try:
+        # Déterminer la recherche restreinte autour du centre
+        if h > w:
+            # Mode portrait : largeur complète, recherche verticale contrainte
+            center_y = (h - w) // 2
+            margin_y = w // 5
+            y_search = (center_y - margin_y, center_y + margin_y)
+            x_search = (0, 0)
+        else:
+            # Mode paysage : hauteur complète, recherche horizontale contrainte
+            center_x = (w - h) // 2
+            margin_x = h // 5
+            x_search = (center_x - margin_x, center_x + margin_x)
+            y_search = (0, 0)
+
+        start_x, step_x, start_y, step_y = find_exact_grid(gray, x_search_range=x_search, y_search_range=y_search)
+        exact_w = step_x * 8
+        exact_h = step_y * 8
+        
+        # S'assurer que la boîte reste dans les limites de l'image originale
+        exact_x = int(max(0, min(start_x, w - 1)))
+        exact_y = int(max(0, min(start_y, h - 1)))
+        exact_w = int(max(8, min(exact_w, w - exact_x)))
+        exact_h = int(max(8, min(exact_h, h - exact_y)))
+        
+        logger.info(f"Alignement par grille de gradients réussi : x={exact_x}, y={exact_y}, w={exact_w}, h={exact_h}")
+        exact_crop = image_np[exact_y:exact_y+exact_h, exact_x:exact_x+exact_w]
+        warped = cv2.resize(exact_crop, (640, 640))
+        return warped, {"x": exact_x, "y": exact_y, "w": exact_w, "h": exact_h}
+    except Exception as e:
+        logger.error(f"Erreur lors de l'alignement par grille de gradients: {e}. Utilisation du recadrage central par défaut.")
+        min_dim = min(h, w)
+        start_y = (h - min_dim) // 2
+        start_x = (w - min_dim) // 2
+        cropped = image_np[start_y:start_y+min_dim, start_x:start_x+min_dim]
+        warped = cv2.resize(cropped, (640, 640))
+        return warped, {"x": start_x, "y": start_y, "w": min_dim, "h": min_dim}
+
+
 
 def slice_board(board_img):
     """
@@ -349,9 +422,11 @@ def classify_board_to_fen(board_img):
             global_bg = bg_a if (r + c) % 2 == 0 else bg_b
             sq_orig = squares[r][c]
             
-            # Estimer l'arrière-plan local à partir de la médiane de la case originale non-nettoyée
-            # Cela est beaucoup plus robuste aux bruits de grilles et aux labels de coordonnées sur les cases de bordures
-            local_bg = np.median(sq_orig.reshape(-1, 3), axis=0)
+            # Estimer l'arrière-plan local à partir de la médiane des coins de la case originale non-nettoyée
+            # Cela est beaucoup plus robuste aux pièces, aux bruits de grilles et aux débordements des cases voisines
+            corners = [sq_orig[4:12, 4:12], sq_orig[4:12, 68:76], sq_orig[68:76, 4:12], sq_orig[68:76, 68:76]]
+            pooled_corners = np.concatenate(corners, axis=0).reshape(-1, 3)
+            local_bg = np.median(pooled_corners, axis=0)
             dist = np.linalg.norm(local_bg - global_bg)
             bg_color_bgr = local_bg if dist > 15.0 else global_bg
             
