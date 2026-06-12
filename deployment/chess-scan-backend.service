@@ -1,0 +1,16 @@
+[Unit]
+Description=Service Backend FastAPI Chess Scan
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/chess-scan/backend
+Environment="PATH=/var/www/chess-scan/backend/venv/bin"
+Environment="PYTHONPATH=/var/www/chess-scan/backend"
+ExecStart=/var/www/chess-scan/backend/venv/bin/gunicorn -w 4 -k uvicorn.workers.UvicornWorker -b 127.0.0.1:8000 app.main:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
