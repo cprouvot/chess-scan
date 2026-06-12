@@ -234,8 +234,7 @@ code, pre {
   width: 100%;
   border-radius: 8px;
   overflow: hidden;
-  box-shadow: var(--shadow-lg);
-  border: 4px solid var(--bg-surface-solid);
+  box-shadow: 0 0 0 4px var(--bg-surface-solid), var(--shadow-lg);
 }
 
 .chessboard {
