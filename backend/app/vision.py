@@ -183,7 +183,8 @@ def find_and_warp_board(image_np):
         aspect_ratio = float(cw) / ch
         
         # Pour une capture d'écran d'un échiquier, le ratio largeur/hauteur doit être proche de 1.0
-        if 0.90 <= aspect_ratio <= 1.10:
+        # Et le contour doit occuper au moins 45% de la largeur et de la hauteur de l'image (pour rejeter les faux positifs)
+        if 0.90 <= aspect_ratio <= 1.10 and cw >= w * 0.45 and ch >= h * 0.45:
             if area > best_area:
                 best_area = area
                 best_cnt = cnt
@@ -245,24 +246,36 @@ def slice_board(board_img):
     return squares
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
-os.makedirs(TEMPLATES_DIR, exist_ok=True)
-
 PIECES = ['wP', 'wN', 'wB', 'wR', 'wQ', 'wK', 'bP', 'bN', 'bB', 'bR', 'bQ', 'bK']
+
+THEMES = {
+    "wikipedia": {
+        "url_pattern": "https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png",
+        "dir": os.path.join(TEMPLATES_DIR, "wikipedia")
+    },
+    "neo": {
+        "url_pattern": "https://images.chesscomfiles.com/chess-themes/pieces/neo/150/{piece_lower}.png",
+        "dir": os.path.join(TEMPLATES_DIR, "neo")
+    }
+}
 
 def ensure_templates():
     """
-    S'assure que les gabarits PNG de pièces sont téléchargés localement.
+    S'assure que les gabarits PNG de pièces sont téléchargés localement pour tous les thèmes.
     """
     import urllib.request
-    for piece in PIECES:
-        path = os.path.join(TEMPLATES_DIR, f"{piece}.png")
-        if not os.path.exists(path):
-            url = f"https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png"
-            try:
-                logger.info(f"Téléchargement du gabarit {piece} depuis {url}...")
-                urllib.request.urlretrieve(url, path)
-            except Exception as e:
-                logger.error(f"Erreur lors du téléchargement de {piece}: {e}")
+    for theme_name, theme in THEMES.items():
+        os.makedirs(theme["dir"], exist_ok=True)
+        for piece in PIECES:
+            path = os.path.join(theme["dir"], f"{piece}.png")
+            if not os.path.exists(path):
+                piece_param = piece.lower() if theme_name == "neo" else piece
+                url = theme["url_pattern"].format(piece=piece_param, piece_lower=piece_param)
+                try:
+                    logger.info(f"Téléchargement du gabarit {piece} ({theme_name}) depuis {url}...")
+                    urllib.request.urlretrieve(url, path)
+                except Exception as e:
+                    logger.error(f"Erreur lors du téléchargement de {piece} ({theme_name}): {e}")
 
 
 def estimate_square_bg(sq, r, c, bg_a, bg_b):
@@ -418,33 +431,34 @@ def classify_board_to_fen(board_img):
             best_piece = ""
             best_iou = -1.0
             
-            # Recherche du meilleur template par Sliding IoU
+            # Recherche du meilleur template par Sliding IoU (sur tous les thèmes actifs)
             for piece in allowed_pieces:
-                template_path = os.path.join(TEMPLATES_DIR, f"{piece}.png")
-                template_rgba = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
-                if template_rgba is None:
-                    continue
-                    
-                for scale in [0.75, 0.80, 0.85, 0.90, 0.95]:
-                    w_sc = int(80 * scale)
-                    h_sc = int(80 * scale)
-                    
-                    scaled_rgba = cv2.resize(template_rgba, (w_sc, h_sc))
-                    alpha = scaled_rgba[:, :, 3]
-                    template_mask = alpha > 0
-                    
-                    try:
-                        res = cv2.matchTemplate(sq_mask_filled.astype(np.uint8), template_mask.astype(np.uint8), cv2.TM_CCORR)
-                        _, max_val, _, _ = cv2.minMaxLoc(res)
+                for theme_name, theme in THEMES.items():
+                    template_path = os.path.join(theme["dir"], f"{piece}.png")
+                    template_rgba = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
+                    if template_rgba is None:
+                        continue
                         
-                        union = sq_mask_filled.sum() + template_mask.sum() - max_val
-                        iou = max_val / union if union > 0 else 0.0
+                    for scale in [0.75, 0.80, 0.85, 0.90, 0.95]:
+                        w_sc = int(80 * scale)
+                        h_sc = int(80 * scale)
                         
-                        if iou > best_iou:
-                            best_iou = iou
-                            best_piece = piece
-                    except Exception:
-                        pass
+                        scaled_rgba = cv2.resize(template_rgba, (w_sc, h_sc))
+                        alpha = scaled_rgba[:, :, 3]
+                        template_mask = alpha > 0
+                        
+                        try:
+                            res = cv2.matchTemplate(sq_mask_filled.astype(np.uint8), template_mask.astype(np.uint8), cv2.TM_CCORR)
+                            _, max_val, _, _ = cv2.minMaxLoc(res)
+                            
+                            union = sq_mask_filled.sum() + template_mask.sum() - max_val
+                            iou = max_val / union if union > 0 else 0.0
+                            
+                            if iou > best_iou:
+                                best_iou = iou
+                                best_piece = piece
+                        except Exception:
+                            pass
                         
             if best_iou < 0.20:
                 row_pieces.append("")
@@ -469,10 +483,12 @@ def classify_board_to_fen(board_img):
                 data = squares_data[(r, c)]
                 sq_mask = data["sq_mask"]
                 
-                # Match White King template
-                template_path = os.path.join(TEMPLATES_DIR, "wK.png")
-                template_rgba = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
-                if template_rgba is not None:
+                # Match White King template sur tous les thèmes
+                for theme_name, theme in THEMES.items():
+                    template_path = os.path.join(theme["dir"], "wK.png")
+                    template_rgba = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
+                    if template_rgba is None:
+                        continue
                     for scale in [0.75, 0.80, 0.85, 0.90, 0.95]:
                         w_sc = int(80 * scale)
                         h_sc = int(80 * scale)
@@ -507,10 +523,12 @@ def classify_board_to_fen(board_img):
                 data = squares_data[(r, c)]
                 sq_mask = data["sq_mask"]
                 
-                # Match Black King template
-                template_path = os.path.join(TEMPLATES_DIR, "bK.png")
-                template_rgba = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
-                if template_rgba is not None:
+                # Match Black King template sur tous les thèmes
+                for theme_name, theme in THEMES.items():
+                    template_path = os.path.join(theme["dir"], "bK.png")
+                    template_rgba = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
+                    if template_rgba is None:
+                        continue
                     for scale in [0.75, 0.80, 0.85, 0.90, 0.95]:
                         w_sc = int(80 * scale)
                         h_sc = int(80 * scale)
